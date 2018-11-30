@@ -8,6 +8,10 @@ C++ provides the following classes to perform output and input of characters to/
 
 These classes are derived directly or indirectly from the classes `istream` and `ostream`. We have already used objects whose types were these classes: `cin` is an object of class `istream` and `cout` is an object of class `ostream`. Therefore, we have already been using classes that are related to our file streams. And in fact, we can use our file streams the same way we are already used to use `cin` and `cout`, with the only difference that we have to associate these streams with physical files.
 
+The relationship of input and output streams as follows:
+
+![](iostream_relationship.png)
+
 ## Open file
 
 The first operation generally performed on an object of one of these classes is to associate it to a real file. This procedure is known as to *open a file*. An open file is represented within a program by a *stream* and any input or output operation performed on this stream object will be applied to the physical file associated to it.
