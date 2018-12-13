@@ -265,7 +265,148 @@ std::size_t CTextBlock::length() const {
 
 # Item 4: 确定对象被使用之前已经完成了初始化
 
- 
+对象在被定义时不一定会自动进行初始化：
+
+> In general, if you’re in the C part of C++ (see Item 1) and initialization
+> would probably incur a runtime cost, it’s not guaranteed to take
+> place. If you cross into the non-C parts of C++, things sometimes
+> change. This explains why an array (from the C part of C++) isn’t necessarily
+> guaranteed to have its contents initialized, but a vector (from
+> the STL part of C++) is.
+
+读取未初始化的对象是未定义的行为（undefined behavior），在某系统上可能会导致宕机，或者读取一些随机内容。我们要谨记：永远要在使用对象之前先将它初始化。
+
+## initialization and assignment
+
+对于内置类型，我们必须手动完成初始化；对于自定义类型，可以通过构造函数（constructor）来完成初始化，不过这里有点要注意：不要将初始化跟赋值相混淆。
+
+```c++
+class PhoneNumber {};
+class ABEntry {
+  public:
+    ABEntry(const std::string& name, 
+            const std::string& address, 
+            const std::list<PhoneNumber>& phones);
+  private:
+    std::string theName;
+    std::string theAddress;
+    std::list<PhoneNumber> thePhones;
+    int count;
+};
+
+ABEntry::ABEntry(const std::string& name, 
+        		 const std::string& address, 
+                 const std::list<PhoneNumber>& phones) {
+    theName = name;
+    theAddress = address;
+    thePhones = phones;
+    count = 0;
+}
+```
+
+以上构造函数在函数体内进行的操作并非对成员变量的初始化，而是赋值操作。这是因为 C++ 规定，成员变量的初始化在进入构造函数体内之前已经完成。因此上例的真实行为是，成员变量 `theName`, `theAddress`, `thePhones` 在进入构造函数体之前，已经调用 default 构造函数完成了初始化，然后在构造函数体内再次调用 copy assignment 操作符完成赋值操作。显然对成员变量进行一次初始化，再进行一次赋值是冗余低效，甚至可能是错误的。
+
+## member initialization list
+
+为了精确的初始化成员变量，不应该在构造函数体内进行赋值，而是应该使用成员初始化列表（member initialization list）语法，如下所示：
+
+```c++
+ABEntry::ABEntry(const std::string& name, 
+        		 const std::string& address, 
+                 const std::list<PhoneNumber>& phones):
+	theName(name),
+	theAddress(address),
+	thePhones(phones),
+	count(0)
+	{ }
+```
+
+本例中成员变量 `theName`, `theAddress`, `thePhones` 在初始化列表中调用了 copy 构造函数来完成了初始化。
+
+我们还可以实现一个无参数的构造函数：
+
+```c++
+ABEntry::ABEntry(const std::string& name, 
+        		 const std::string& address, 
+                 const std::list<PhoneNumber>& phones):
+	theName(),
+	theAddress(),
+	thePhones(),
+	count(0)
+	{ }
+```
+
+本例中成员变量 `theName`, `theAddress`, `thePhones` 在初始化列表中调用了 default 构造函数来完成了初始化。
+
+一般情况，不论是内置类型还是自定义类型的成员变量，都建议通过成员初始化列表来进行精确的初始化。如果不同的构造函数都有许多相同的成员初始化动作，可以考虑将这些成员变量从列表中移除，用赋值操作来完成“初始化”，并将赋值操作放入某个 private 函数中，然后由这些构造函数调用该函数。如：需要从配置文件中加载配置项。
+
+## the order of member initialization
+
+成员初始化次序：基类（base class）成员早于派生类（derived class），且一个类中成员变量的初始化次序跟成员变量在类中声明的顺序相对应，跟成员初始化列表的次序无关。为了可读性的考虑，建议成员初始化列表的次序跟成员的声明次序保持一致。
+
+## non-local static object initialization in different translation units.
+
+C++ 规定，定义于不同编译单元内的 non-local static 对象之间的初始化次序是不确定的。
+
+static 对象的声明周期从程序运行开始，到程序结束时终止。static 对象根据作用于可以分为 local static 和 non-local static，我们将定义在函数内部的 static 对象称为 local 的，其余的称为 non-local 的（如：定义于全局作用域的，定义于 namespace 作用域，定义于文件作用域的）。
+
+编译单元（translation unit）是指生成单一目标文件（object file）所对应的源码。
+
+例：有一个库定义了文件系统对象
+
+```c++
+class FileSystem {
+  public:
+    std::size_t numDisks() const;
+};
+
+extern FileSystem tfs;		// 这里是声明，其定义可能是位于 namespace 作用域的静态对象，以表示全局唯一的文件系统对象
+```
+
+客户使用该对象来处理文件系统目录
+
+```c++
+class Directory {
+  public:
+    Directory() {
+        // 如何保证此时 tfs 已经完成了初始化
+        std::size_t disks = tfs.numDisks();
+    }
+};
+
+Directory tempDir();
+```
+
+这里我们无法保证在创建 `tempDir` 对象时，`tfs` 已经完成了初始化。
+
+我们可以使用单例模式（singleton）来解决这个问题，如下：
+
+```c++
+class FileSystem {
+  public:
+    std::size_t numDisks() const;
+};
+
+FileSystem& tfs() {
+    static FileSystem fs;
+    return fs;
+}
+```
+
+要使用文件系统实例，就调用 `tfs()` 函数来获得，这样保证了使用它之前，初始化一定已经完成。
+
+## summary
+
+- 内置类型要手动初始化
+- 构造函数最好用成员初始化列表进行初始化，尽量避免在构造函数体内进行赋值操作
+- 出于可读性的考虑，成员初始化列表的顺序最好跟类中声明的顺序相一致
+- 用单例模型和 local static 来避免 non-local static 对象初始化顺序的不确定性
+
+
+
+
+
+
 
 
 
