@@ -278,5 +278,251 @@ class DBConnProxy {
 
 此例中通过公开接口 `close()` 来给用户权利来处理关闭数据库连接期间引发的异常，如果客户放弃了该权利，析构函数仍然会关闭数据库连接并处理异常。
 
+# Item 9: 绝不要在构造和析构函数中调用虚函数
+
+股票交易有买进、卖出等，它们都有一个共同的交易基类，而所有的交易都应该被记录到审计系统中：
+
+```c++
+class Transaction {
+  public:
+    Transaction();
+    ~Transaction();
+    virtual void logTransaction() const = 0;	// pure virtual
+};
+
+Transaction::Transaction() {
+    // construction
+    
+    // audit log, call a virtual function
+    logTransaction();
+}
+
+class BuyTransaction: public Transaction {
+  public:
+    virtual void logTransaction() const;
+};
+
+class SellTransaction: public Transaction {
+  public:
+    virtual void logTransaction() const;
+};
+```
+
+如果我们实例化 `BuyTransaction` 或 `SellTransaction` 将会发生什么？在实例化派生类时，基类成分会先被实例化，基类构造函数被调用，不过这里有个关键点：基类 `Transaction` 构造函数中调用了虚函数 `logTransaction()`，此虚函数是基类的版本而非派生类的版本。换句话说，基类构造期间虚函数绝不会下降到派生类。C++ 之所以这样规定，有以下几个理由：
+
+- 基类构造时，派生类成员变量并没有初始化，如果虚函数是派生类的版本，那将会访问未初始化的派生类成员变量，显然是不合适的。
+- 基类构造时，对象类型就是基类而非派生类，因此调用基类版本的虚函数也是合理的。对象在派生类构造函数调用之前，是不会成为一个派生类对象的。
+
+上面的道理同样适用于析构函数，绝对不要在析构函数中调用虚函数。不仅仅是直接调用虚函数不行，间接调用也是不合理的。而且这类错误很难被发现：如果基类虚函数没有定义的话，连接器可能会报错；如果基类虚函数有定义的话，系统正常被编译连接和运行。
+
+那么如何保证每个交易对象被创建时，就会记录到审计系统中呢？不要依赖虚函数的多态特性让不同交易对象实现各自的审计逻辑，而应该让派生类将审计信息打包后传递给基类构造函数，如下：
+
+```c++
+class Transaction {
+  public:
+    explicit Transaction(const std::string& logInfo);
+    void logTransaction(const std::string& logInfo) const;	// non-virtual
+};
+
+Transaction::Transaction(const std::string& logInfo) {
+    
+    // audit log
+    logTransaction(logInfo);
+}
+
+class BuyTransaction: public Transaction {
+  public:
+    BuyTransaction(params): Transaction(createLogString(params)) { }
+  private:
+    // 创建该派生类的审计日志信息
+    static std::string createLogString(params);  // static 确保不会访问 non-static 成员变量（它们还未初始化）
+};
+```
+
+# Item 10: 赋值运算函数返回对自身的引用
+
+要实现链式赋值，如：`a=b=c=1`，自定义类的赋值运算函数需要返回运算符左侧操作数的引用（即对象自身的引用），示例：
+
+```c++
+class A {
+  public:
+    A& operator=(const A& rhs) {  	// 返回类型是一个引用
+        // ...
+        return (*this);				// 返回当前对象，即左操作数
+    }
+};
+```
+
+此外其它赋值运算也遵从该准则，如：`+=`， `-=`， `*=` 等。该准则只是一个约定而已，即使不遵循它，也一样可以通过编译。
+
+# Item 11: 赋值运算函数中处理自我赋值问题
+
+什么是自我赋值？
+
+```c++
+class A;
+
+A a1;
+a1 = a1;
+
+A l[10];
+int i=3, j=3;
+l[i] = l[j];
+
+A* pa = &a1;
+A* pb = &a1;
+*pa = *pb;
+```
+
+从上例可以看出，由于别名的存在自我赋值以各种方式存在，是不可避免的。
+
+那么当某个对象赋值给它自己时，会发生什么，或者说我们在处理赋值时，应该要为自我赋值注意些什么？
+
+```c++
+class Bitmap {};
+class Widget {
+  public:
+    Widget& operator=(const Widget& rhs);
+  private:
+    Bitmap* bp;
+};
+
+Widget& Widget::operator=(const Widget& rhs) {
+    delete bp;
+    bp = new Bitmap(*(rhs.bp));
+    return *this;
+}
+```
+
+如果上例中的 `rhs` 就是当前对象呢？先把当期对象的 `bp` 删除，再拷贝它，最后返回的指针指向了已经被删除的对象，显然逻辑是错误的。我们可以通过增加自我测试来改进它：
+
+```c++
+Widget& Widget::operator=(const Widget& rhs) {
+    if (this == &rhs) return *this;
+    delete bp;					// 删除当前对象的 bp
+    bp = new Bitmap(*(rhs.bp)); // 拷贝 rhs 对象的 bp
+    return *this;
+}
+```
+
+虽然现在自我赋值是安全了，但还有个问题没解决：如果创建新 `Bitmap` 对象抛出异常失败呢？由于在创建新对象之前，先删除了原来的 `Bitmap` 对象，因此新对象创建失败将导致 `bp` 指向一个已经被删除的对象。这个问题叫做异常安全问题。要解决该问题需要这样：
+
+```c++
+Widget& Widget::operator=(const Widget& rhs) {
+	Bitmap *tmp = bp;
+    bp = new Bitmap(*(rhs.bp));
+    delete tmp;
+    return *this;
+}
+```
+
+最后的解决方案同时具备自我赋值安全性和异常安全性。
+
+# Item 12: 复制对象时要完整
+
+> In well-designed object-oriented systems that encapsulate the internal
+> parts of objects, only two functions copy objects: the aptly named
+> copy constructor and copy assignment operator. We’ll call these the
+> copying functions.
+
+## 复制所有成员变量
+
+这里有一个顾客类：
+
+```c++
+void logCall(const std::string& funcName);
+
+class Customer {
+  public:
+    Customer(const Customer& rhs);
+    Customer& operator=(const Customer& rhs);
+  private:
+    std::string name;
+    long timestamp;
+};
+
+Customer::Customer(const Customer& rhs): name(rhs.name) {
+    logCall("copy constructor");
+}
+
+Customer& Customer::operator=(const Customer& rhs) {
+    name = rhs.name;
+    logCall("copy assignment operator");
+    return *this;
+}
+```
+
+上面的问题在哪里？copy 构造函数和 copy 赋值函数都没有复制成员 `timestamp`，但这并不是语法错误，编译器不会为此报错。改进如下：
+
+```c++
+Customer::Customer(const Customer& rhs): name(rhs.name), timestamp(rhs.timestamp) {
+    logCall("copy constructor");
+}
+
+Customer& Customer::operator=(const Customer& rhs) {
+    name = rhs.name;
+    timestamp = rhs.timestamp;
+    logCall("copy assignment operator");
+    return *this;
+}
+```
+
+每次为类增加一个新的成员变量时，也要同时修改 copying 函数使得它们也会复制新成员。
+
+## 复制基类成员变量
+
+再来看一个例子：
+
+```c++
+class PriorityCustomer: public Customer {
+  public:
+    PriorityCustomer(const PriorityCustomer& rhs);
+    PriorityCustomer& operator=(const PriorityCustomer& rhs);
+  private:
+    int priority;
+};
+
+PriorityCustomer::PriorityCustomer(const PriorityCustomer& rhs): priority(rhs.priority) {
+	    
+}
+
+PriorityCustomer& PriorityCustomer::operator=(const PriorityCustomer& rhs) {
+    priority = rhs.priority;
+    return *this;
+}
+```
+
+这个例子中的问题在于，派生类的复制函数仅仅处理了自己声明的成分，而没有处理继承自基类的成分，改正如下：
+
+```c++
+// 成员初始化列表中调用基类 copy 构造函数
+PriorityCustomer::PriorityCustomer(const PriorityCustomer& rhs): Customer(rhs), priority(rhs.priority) {
+	    
+}
+
+PriorityCustomer& PriorityCustomer::operator=(const PriorityCustomer& rhs) {
+    // 调用基类的 copy 赋值函数
+    Customer::operator=(rhs);
+    priority = rhs.priority;
+    return *this;
+}
+```
+
+## 抽取 copy  构造和 copy 复制函数的共同逻辑
+
+copy  构造和 copy 复制函数有许多逻辑是共用的，不过不推荐用其中一个调用另一个来避免重复，因为这样做是不合理的。一般我们会将共用的逻辑放在一个 `init` 的 private 函数中，然后分别在 copy  构造和 copy 复制函数中调用它。
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
