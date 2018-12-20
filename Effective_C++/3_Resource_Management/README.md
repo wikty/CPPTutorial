@@ -159,21 +159,120 @@ Mutex m;	// 创建互斥器
 
 # Item 15: 在资源管理类中访问原始的资源对象
 
-大多数情况下，我们直接使用管理对象即可，但在某些情况下，我们需要直接访问它所管理的资源对象，如下：
+大多数情况下，我们直接使用管理对象即可，但有些 API 需要我们提供原始资源对象而非管理对象，此时我们需要直接访问资源对象，如下：
 
 ```c++
 std::shared_ptr<Investment> pInv(createInvestment());
 
-void print(const Investment *p);
+void print(const Investment *p); // 该函数不接受管理对象，仅接受资源对象
 ```
 
-我们可以直接将 `shared_ptr` 对象传递给函数 `print` 吗？显然不行，由于类型不匹配，不能通过编译。为此我们需要直接访问资源对象，`auto_ptr` 和 `shared_ptr` 都提供了 `get()` 方法来访问资源对象。
+我们可以直接将 `shared_ptr` 对象传递给函数 `print` 吗？显然不行，由于类型不匹配，不能通过编译。为此我们需要直接访问资源对象，`auto_ptr` 和 `shared_ptr` 都提供了 `get()` 方法来实现**显式转换**为资源对象。
 
 ```c++
 print(pInv.get());	// get() 返回指向资源对象的指针
 ```
 
+此外还可以通过指针或成员运算符实现**隐式转换**：
 
+```c++
+pInv->hello(); // 假设 hello() 是 Investment 的成员函数
+(*pInv).hello();
+```
+
+同样在自定义的资源管理类中，我们也可以实现管理对象到资源对象的显式和隐式转换：
+
+```c++
+// The C APIs is used to manage FontHandle resource
+FontHandle getFont();
+void releaseFont(FontHandle fh);
+
+// Resource manager
+class Font {
+  private:
+    FontHandle fh;
+  public:
+    explicit Font(FontHandle f): fh(f) { }
+    ~Font() {
+        releaseFont(fh);
+    }
+    // 通过 get() 实现显式转换
+    FontHandle get() const { return fh; }
+    // 实现隐式转换
+    operator FontHandle() const { return fh; }
+};
+
+// The C APIs only accepts raw resource object FontHandle
+void changeFontSize(FontHandle fh, int size);
+
+Font f(getFont());
+changeFontSize(f.get(), 20);  // 显式
+changeFontSize(f, 20);  // 隐式
+```
+
+从上例可见隐式转换对客户更加友好。不过也潜藏着危险：
+
+```c++
+FontHandle fh;
+{
+	Font f(getFont());
+	fh = f;  // 隐式转换，此时资源对象既可以被 f 也可以被 fh 访问
+    
+    // 离开区块时，资源对象被管理对象销毁
+}
+
+// 此时 fh 成为将引用无效资源对象
+```
+
+# Item 16: new 和 delete 要匹配
+
+当创建对象时使用的是 `new` 则销毁对象时需要使用 `delete`，但如果创建对象时使用的是 `new name[]`，则销毁对象时应该使用 `delete [] name`。
+
+错误示范：
+
+```c++
+std::string *ps1 = new std::string;
+std::string *ps2 = new std::string[10];
+
+delete [] ps1;  // error!
+delete ps2;    // error!
+```
+
+在单个对象上调用 `delete [] name`，以及在数组对象上调用 `delete name` 都是未定义的行为。
+
+先让我们来看 `new` 和 `delete` 到底干了什么？`new` 时，会分配内存并调用对象的构造函数，如果创建的是数组，会分配额外的内存用来记录数组的大小；`delete` 时，会调用对象的析构函数并释放内存。由于创建单个对象和数组的内存结构是不一样的，那 `delete` 是如何知道要处理的内存块是用来保存单个对象的，还是数组的呢？这就需要我们明确的通过 `delete [] name` 语法来告诉它。
+
+一般来说，我们很容易保证这样去做，但如果遇到下面这种情形就会有点困惑了：
+
+```c++
+typedef std::string Address[4];
+
+std::string *p = new Address;
+delete p;  // error!
+```
+
+这里 `typedef` 会隐藏数据类型，最好不要对数组进行 `typedef`，取而代之可以用 `vector` ： `typedef std::vector<std::string> Address;`。
+
+# Item 17: 以单独语句来添加资源对象
+
+如果以复合语句添加资源对象，可能会导致资源泄漏，见下例：
+
+```c++
+int priority();
+void processWidget(std::shared_ptr<Widget> pw, int priority);
+
+// 用复合语句添加资源对象
+processWidget(std::shared_ptr<Widget>(new Widget), priority());
+```
+
+上面的复合语句有可能会导致资源泄漏，该语句可以拆分为三个原子操作：`new Widget `, `std::shared_ptr<Widget>` 和 `priority()`，由于 C++ 并不保证参数的评估顺序，因此可能会出现这样的执行顺序：`new Widget` -> `priority()` -> `std::shared_ptr<Widget>`，如果 `priority()` 抛出异常，那么之前创建的资源就会泄漏。
+
+可以通过拆分语句来解决该问题：
+
+```c++
+std::shared_ptr<Widget> pw(new Widget);
+processWidget(pw, priority());
+```
 
 
 
